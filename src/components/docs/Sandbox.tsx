@@ -1,4 +1,4 @@
-import React, { Component, useEffect, useMemo, useState } from 'react'
+import React, { Component, useMemo, useRef, useState } from 'react'
 import type { ComponentDoc, PropValue } from '@/types'
 import { getComponentExport } from '@/utils/componentLoader'
 import { safeConvertForRender, validatePropValue } from '@/utils/propUtils'
@@ -11,19 +11,26 @@ interface SandboxProps {
 interface ErrorBoundaryState {
   hasError: boolean
   error: Error | null
+  errorKey: number
 }
 
 class SandboxErrorBoundary extends Component<
-  { children: React.ReactNode; componentName: string },
+  { children: React.ReactNode; componentName: string; resetKey: number },
   ErrorBoundaryState
 > {
-  constructor(props: { children: React.ReactNode; componentName: string }) {
+  constructor(props: { children: React.ReactNode; componentName: string; resetKey: number }) {
     super(props)
-    this.state = { hasError: false, error: null }
+    this.state = { hasError: false, error: null, errorKey: 0 }
   }
 
   static getDerivedStateFromError(error: Error): ErrorBoundaryState {
-    return { hasError: true, error }
+    return { hasError: true, error, errorKey: Date.now() }
+  }
+
+  componentDidUpdate(prevProps: { resetKey: number }) {
+    if (this.props.resetKey !== prevProps.resetKey && this.state.hasError) {
+      this.setState({ hasError: false, error: null })
+    }
   }
 
   componentDidCatch(error: Error) {
@@ -47,7 +54,7 @@ class SandboxErrorBoundary extends Component<
             ⚠️ 组件渲染出错
           </div>
           <div style={{ fontSize: '12px', color: '#7f1d1d', lineHeight: 1.5 }}>
-            可能是 Props 类型不匹配导致。请检查控制面板中的值是否正确。
+            Props 值可能导致组件崩溃，修正后自动恢复。
           </div>
           {this.state.error && (
             <pre
@@ -60,6 +67,7 @@ class SandboxErrorBoundary extends Component<
                 fontSize: '11px',
                 overflowX: 'auto',
                 lineHeight: 1.5,
+                maxHeight: '120px',
               }}
             >
               {this.state.error.message}
@@ -74,13 +82,16 @@ class SandboxErrorBoundary extends Component<
 
 export const Sandbox: React.FC<SandboxProps> = ({ component, propsValues }) => {
   const [loadError, setLoadError] = useState<string | null>(null)
+  const [renderKey, setRenderKey] = useState(0)
+  const lastValidPropsRef = useRef<Record<string, unknown> | null>(null)
+  const hasAnyInvalidRef = useRef(false)
 
   const Component = useMemo(() => {
     setLoadError(null)
     try {
       const exp = getComponentExport(component)
       if (!exp) {
-        setLoadError(`未找到组件导出 "${component.name}"，请检查组件文件是否有默认导出或命名导出`)
+        setLoadError(`未找到组件导出 "${component.name}"`)
         return null
       }
       return exp
@@ -92,23 +103,44 @@ export const Sandbox: React.FC<SandboxProps> = ({ component, propsValues }) => {
 
   const processedProps = useMemo(() => {
     const result: Record<string, unknown> = {}
+    let hasInvalid = false
+
     for (const prop of component.props) {
       const rawValue = propsValues[prop.name]
-      if (rawValue === undefined) {
-        continue
-      }
+      if (rawValue === undefined) continue
+
       const validation = validatePropValue(rawValue, prop)
       if (!validation.valid) {
+        hasInvalid = true
         continue
       }
+
       try {
         result[prop.name] = safeConvertForRender(rawValue, prop.type, prop.name)
       } catch (e) {
         console.warn(`[Sandbox] Props "${prop.name}" 转换失败，跳过:`, e)
+        hasInvalid = true
       }
     }
+
+    if (!hasInvalid && Object.keys(result).length > 0) {
+      lastValidPropsRef.current = result
+    }
+
+    hasAnyInvalidRef.current = hasInvalid
+
+    if (hasInvalid && lastValidPropsRef.current) {
+      return lastValidPropsRef.current
+    }
+
     return result
   }, [component, propsValues])
+
+  useMemo(() => {
+    if (!hasAnyInvalidRef.current) {
+      setRenderKey((k) => k + 1)
+    }
+  }, [processedProps])
 
   const propsJson = useMemo(() => {
     const display: Record<string, PropValue> = {}
@@ -119,6 +151,8 @@ export const Sandbox: React.FC<SandboxProps> = ({ component, propsValues }) => {
     }
     return JSON.stringify(display, null, 2)
   }, [propsValues])
+
+  const showingFallback = hasAnyInvalidRef.current && lastValidPropsRef.current !== null
 
   if (loadError) {
     return (
@@ -169,9 +203,28 @@ export const Sandbox: React.FC<SandboxProps> = ({ component, propsValues }) => {
           alignItems: 'center',
           justifyContent: 'center',
           overflow: 'auto',
+          position: 'relative',
         }}
       >
-        <SandboxErrorBoundary componentName={component.name}>
+        {showingFallback && (
+          <div
+            style={{
+              position: 'absolute',
+              top: '8px',
+              right: '8px',
+              padding: '4px 10px',
+              fontSize: '10px',
+              backgroundColor: '#fef3c7',
+              color: '#92400e',
+              borderRadius: '4px',
+              fontWeight: 600,
+              zIndex: 1,
+            }}
+          >
+            ⚠️ Props 含非法值，显示上一次正常渲染
+          </div>
+        )}
+        <SandboxErrorBoundary componentName={component.name} resetKey={renderKey}>
           <Component {...processedProps} />
         </SandboxErrorBoundary>
       </div>
@@ -186,7 +239,7 @@ export const Sandbox: React.FC<SandboxProps> = ({ component, propsValues }) => {
             letterSpacing: '0.5px',
           }}
         >
-          当前 Props（已过滤非法值）
+          当前 Props
         </div>
         <pre
           style={{
