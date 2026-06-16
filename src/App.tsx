@@ -1,25 +1,12 @@
 import React, { useMemo, useState } from 'react'
 import type { ComponentDoc, PropValue } from '@/types'
-import { loadAllComponents } from '@/utils/componentLoader'
+import { loadAllComponents, ComponentDocWithCategory } from '@/utils/componentLoader'
+import { generateSampleValue, parseDefaultValue } from '@/utils/propUtils'
 import { Sidebar } from '@/components/docs/Sidebar'
 import { PropsTable } from '@/components/docs/PropsTable'
 import { ControlPanel } from '@/components/docs/ControlPanel'
 import { Sandbox } from '@/components/docs/Sandbox'
 import { SourceViewer } from '@/components/docs/SourceViewer'
-
-function parseDefaultValue(defaultValue: string | undefined, type: string): PropValue {
-  if (defaultValue === undefined) return undefined
-  const trimmed = defaultValue.trim()
-  if (trimmed === "''" || trimmed === '""') return ''
-  if (trimmed === 'true') return true
-  if (trimmed === 'false') return false
-  const num = Number(trimmed)
-  if (!isNaN(num)) return num
-  if (trimmed.startsWith("'") || trimmed.startsWith('"')) {
-    return trimmed.slice(1, -1)
-  }
-  return trimmed
-}
 
 function initComponentDefaults(component: ComponentDoc): Record<string, PropValue> {
   const result: Record<string, PropValue> = {}
@@ -27,25 +14,14 @@ function initComponentDefaults(component: ComponentDoc): Record<string, PropValu
     if (prop.defaultValue !== undefined) {
       result[prop.name] = parseDefaultValue(prop.defaultValue, prop.type)
     } else if (prop.required) {
-      if (prop.type === 'string') {
-        result[prop.name] = ''
-      } else if (prop.type === 'number') {
-        result[prop.name] = 0
-      } else if (prop.type === 'boolean') {
-        result[prop.name] = false
-      } else if (prop.type.includes("'") && prop.type.includes('|')) {
-        const match = prop.type.match(/["']([^"']+)["']/)
-        if (match) {
-          result[prop.name] = match[1]
-        }
-      }
+      result[prop.name] = generateSampleValue(prop.type)
     }
   }
   return result
 }
 
 const App: React.FC = () => {
-  const components = useMemo(() => loadAllComponents(), [])
+  const components: ComponentDocWithCategory[] = useMemo(() => loadAllComponents(), [])
   const [activeComponent, setActiveComponent] = useState<string | null>(
     components[0]?.name ?? null
   )
@@ -67,14 +43,24 @@ const App: React.FC = () => {
     setActiveComponent(name)
     setShowSource(false)
     setHighlightLine(null)
+    if (!propsValuesMap[name]) {
+      const comp = components.find((c) => c.name === name)
+      if (comp) {
+        setPropsValuesMap((prev) => ({
+          ...prev,
+          [name]: initComponentDefaults(comp),
+        }))
+      }
+    }
   }
 
   const handlePropChange = (propName: string, value: PropValue) => {
     if (!activeComponent) return
+    const compName: string = activeComponent
     setPropsValuesMap((prev) => ({
       ...prev,
-      [activeComponent]: {
-        ...prev[activeComponent],
+      [compName]: {
+        ...prev[compName],
         [propName]: value,
       },
     }))
@@ -87,9 +73,10 @@ const App: React.FC = () => {
 
   const handleResetProps = () => {
     if (!activeComp) return
+    const name: string = activeComp.name
     setPropsValuesMap((prev) => ({
       ...prev,
-      [activeComponent]: initComponentDefaults(activeComp),
+      [name]: initComponentDefaults(activeComp),
     }))
   }
 
@@ -130,6 +117,9 @@ const App: React.FC = () => {
                 justifyContent: 'space-between',
                 alignItems: 'flex-start',
                 gap: '16px',
+                position: 'sticky',
+                top: 0,
+                zIndex: 10,
               }}
             >
               <div>
@@ -156,6 +146,20 @@ const App: React.FC = () => {
                   >
                     {activeComp.props.length} Props
                   </span>
+                  <span
+                    style={{
+                      fontSize: '11px',
+                      padding: '3px 8px',
+                      backgroundColor: '#f3f4f6',
+                      color: '#6b7280',
+                      borderRadius: '999px',
+                      textTransform: 'uppercase',
+                      letterSpacing: '0.3px',
+                      fontWeight: 600,
+                    }}
+                  >
+                    {activeComp.category}
+                  </span>
                 </div>
                 {activeComp.description && (
                   <p style={{ margin: 0, color: '#6b7280', fontSize: '14px', lineHeight: 1.6 }}>
@@ -178,6 +182,9 @@ const App: React.FC = () => {
                     borderRadius: '6px',
                     cursor: 'pointer',
                     transition: 'all 0.15s ease',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '6px',
                   }}
                   onMouseEnter={(e) => ((e.currentTarget as HTMLButtonElement).style.backgroundColor = '#f9fafb')}
                   onMouseLeave={(e) => ((e.currentTarget as HTMLButtonElement).style.backgroundColor = '#ffffff')}
@@ -195,6 +202,9 @@ const App: React.FC = () => {
                     borderRadius: '6px',
                     cursor: 'pointer',
                     transition: 'all 0.15s ease',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '6px',
                   }}
                   onMouseEnter={(e) => ((e.currentTarget as HTMLButtonElement).style.backgroundColor = '#f9fafb')}
                   onMouseLeave={(e) => ((e.currentTarget as HTMLButtonElement).style.backgroundColor = '#ffffff')}
@@ -234,7 +244,7 @@ const App: React.FC = () => {
                 </div>
               </section>
 
-              <div style={{ display: 'grid', gridTemplateColumns: 'minmax(280px, 1fr) 2fr', gap: '24px' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'minmax(300px, 380px) 1fr', gap: '24px' }}>
                 <section>
                   <h3
                     style={{
@@ -255,6 +265,8 @@ const App: React.FC = () => {
                       borderRadius: '8px',
                       border: '1px solid #e5e7eb',
                       padding: '20px',
+                      maxHeight: 'calc(100vh - 320px)',
+                      overflowY: 'auto',
                     }}
                   >
                     <ControlPanel

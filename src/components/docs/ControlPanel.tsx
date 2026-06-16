@@ -1,5 +1,15 @@
-import React from 'react'
-import type { ComponentDoc, PropValue } from '@/types'
+import React, { useMemo, useState } from 'react'
+import type { ComponentDoc, PropValidation, PropValue } from '@/types'
+import {
+  generateSampleValue,
+  inferControlType,
+  isComplexType,
+  isFunctionType,
+  isReactNodeType,
+  parseDefaultValue,
+  parseUnionType,
+  validatePropValue,
+} from '@/utils/propUtils'
 
 interface ControlPanelProps {
   component: ComponentDoc
@@ -7,49 +17,25 @@ interface ControlPanelProps {
   onPropChange: (propName: string, value: PropValue) => void
 }
 
-function parseUnionType(type: string): string[] | null {
-  const match = type.match(/^["']([^"']+)["'](\s*\|\s*["']([^"']+)["'])*$/)
-  if (match) {
-    return type.split('|').map((t) => t.trim().replace(/["']/g, ''))
-  }
-  return null
-}
-
-function inferControlType(type: string): 'text' | 'number' | 'boolean' | 'select' | 'textarea' {
-  const unionOptions = parseUnionType(type)
-  if (unionOptions) return 'select'
-  if (type === 'boolean') return 'boolean'
-  if (type === 'number') return 'number'
-  if (type === 'string' || type.includes('string')) return 'text'
-  if (type.includes('ReactNode') || type.includes('React.ReactNode')) return 'textarea'
-  if (type.includes('=>') || type.includes('function')) return 'text'
-  if (type.includes('[]')) return 'textarea'
-  return 'text'
-}
-
-function parseDefaultValue(defaultValue: string | undefined, type: string): PropValue {
-  if (defaultValue === undefined) return undefined
-  const trimmed = defaultValue.trim()
-
-  if (trimmed === "''" || trimmed === '""') return ''
-  if (trimmed === 'true') return true
-  if (trimmed === 'false') return false
-
-  const num = Number(trimmed)
-  if (!isNaN(num)) return num
-
-  if (trimmed.startsWith("'") || trimmed.startsWith('"')) {
-    return trimmed.slice(1, -1)
-  }
-
-  return trimmed
-}
-
 export const ControlPanel: React.FC<ControlPanelProps> = ({
   component,
   propsValues,
   onPropChange,
 }) => {
+  const [jsonErrors, setJsonErrors] = useState<Record<string, string>>({})
+
+  const validations = useMemo(() => {
+    const result: Record<string, PropValidation> = {}
+    for (const prop of component.props) {
+      const value = propsValues[prop.name]
+      const validation = validatePropValue(value, prop)
+      if (!validation.valid) {
+        result[prop.name] = validation
+      }
+    }
+    return result
+  }, [component, propsValues])
+
   if (component.props.length === 0) {
     return (
       <div
@@ -65,6 +51,35 @@ export const ControlPanel: React.FC<ControlPanelProps> = ({
     )
   }
 
+  const handleJsonChange = (propName: string, rawValue: string) => {
+    onPropChange(propName, rawValue)
+    try {
+      if (rawValue.trim() !== '') {
+        JSON.parse(rawValue)
+      }
+      setJsonErrors((prev) => {
+        const next = { ...prev }
+        delete next[propName]
+        return next
+      })
+    } catch (e) {
+      setJsonErrors((prev) => ({
+        ...prev,
+        [propName]: (e as Error).message,
+      }))
+    }
+  }
+
+  const handleFillSample = (propName: string, type: string) => {
+    const sample = generateSampleValue(type)
+    const controlType = inferControlType(type)
+    if (controlType === 'json') {
+      handleJsonChange(propName, sample as string)
+    } else {
+      onPropChange(propName, sample)
+    }
+  }
+
   return (
     <div
       style={{
@@ -77,8 +92,15 @@ export const ControlPanel: React.FC<ControlPanelProps> = ({
         const currentValue = propsValues[prop.name]
         const controlType = inferControlType(prop.type)
         const unionOptions = parseUnionType(prop.type)
-
         const hasValue = currentValue !== undefined
+        const validation = validations[prop.name]
+        const jsonError = jsonErrors[prop.name]
+        const hasError = validation?.valid === false || !!jsonError
+        const errorMsg = jsonError || validation?.error
+
+        const complex = isComplexType(prop.type)
+        const isFunc = isFunctionType(prop.type)
+        const isNode = isReactNodeType(prop.type)
 
         return (
           <div key={prop.name}>
@@ -106,6 +128,45 @@ export const ControlPanel: React.FC<ControlPanelProps> = ({
                   必填
                 </span>
               )}
+              {isFunc && (
+                <span
+                  style={{
+                    fontSize: '10px',
+                    padding: '1px 6px',
+                    backgroundColor: '#e0e7ff',
+                    color: '#4338ca',
+                    borderRadius: '999px',
+                  }}
+                >
+                  函数
+                </span>
+              )}
+              {isNode && (
+                <span
+                  style={{
+                    fontSize: '10px',
+                    padding: '1px 6px',
+                    backgroundColor: '#fef3c7',
+                    color: '#92400e',
+                    borderRadius: '999px',
+                  }}
+                >
+                  ReactNode
+                </span>
+              )}
+              {complex && !isFunc && !isNode && (
+                <span
+                  style={{
+                    fontSize: '10px',
+                    padding: '1px 6px',
+                    backgroundColor: '#d1fae5',
+                    color: '#065f46',
+                    borderRadius: '999px',
+                  }}
+                >
+                  JSON
+                </span>
+              )}
             </div>
             {prop.description && (
               <p style={{ margin: '0 0 8px 0', fontSize: '12px', color: '#6b7280', lineHeight: 1.4 }}>
@@ -121,7 +182,7 @@ export const ControlPanel: React.FC<ControlPanelProps> = ({
                   width: '100%',
                   padding: '8px 12px',
                   fontSize: '13px',
-                  border: '1px solid #d1d5db',
+                  border: `1px solid ${hasError ? '#ef4444' : '#d1d5db'}`,
                   borderRadius: '6px',
                   backgroundColor: hasValue ? '#ffffff' : '#f9fafb',
                   outline: 'none',
@@ -202,31 +263,10 @@ export const ControlPanel: React.FC<ControlPanelProps> = ({
                   width: '100%',
                   padding: '8px 12px',
                   fontSize: '13px',
-                  border: '1px solid #d1d5db',
+                  border: `1px solid ${hasError ? '#ef4444' : '#d1d5db'}`,
                   borderRadius: '6px',
                   backgroundColor: hasValue ? '#ffffff' : '#f9fafb',
                   outline: 'none',
-                  boxSizing: 'border-box',
-                }}
-              />
-            )}
-
-            {controlType === 'textarea' && (
-              <textarea
-                value={String(currentValue ?? '')}
-                onChange={(e) => onPropChange(prop.name, e.target.value)}
-                placeholder={hasValue ? '' : '输入值...'}
-                style={{
-                  width: '100%',
-                  padding: '8px 12px',
-                  fontSize: '13px',
-                  border: '1px solid #d1d5db',
-                  borderRadius: '6px',
-                  backgroundColor: hasValue ? '#ffffff' : '#f9fafb',
-                  outline: 'none',
-                  minHeight: '60px',
-                  fontFamily: 'inherit',
-                  resize: 'vertical',
                   boxSizing: 'border-box',
                 }}
               />
@@ -238,12 +278,12 @@ export const ControlPanel: React.FC<ControlPanelProps> = ({
                   type="text"
                   value={String(currentValue ?? '')}
                   onChange={(e) => onPropChange(prop.name, e.target.value)}
-                  placeholder={hasValue ? '' : `输入 ${prop.type}...`}
+                  placeholder={hasValue ? '' : `输入文本...`}
                   style={{
                     flex: 1,
                     padding: '8px 12px',
                     fontSize: '13px',
-                    border: '1px solid #d1d5db',
+                    border: `1px solid ${hasError ? '#ef4444' : '#d1d5db'}`,
                     borderRadius: '6px',
                     backgroundColor: hasValue ? '#ffffff' : '#f9fafb',
                     outline: 'none',
@@ -269,27 +309,184 @@ export const ControlPanel: React.FC<ControlPanelProps> = ({
               </div>
             )}
 
+            {controlType === 'function' && (
+              <div
+                style={{
+                  padding: '12px',
+                  backgroundColor: '#f5f3ff',
+                  border: '1px solid #ddd6fe',
+                  borderRadius: '6px',
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', color: '#5b21b6', marginBottom: '4px' }}>
+                  <span>⚡</span>
+                  <strong>函数回调</strong>
+                </div>
+                <div style={{ fontSize: '11px', color: '#7c3aed', lineHeight: 1.5 }}>
+                  预览模式下自动注入安全回调，控制台会打印触发信息。
+                </div>
+                <div style={{ fontSize: '11px', color: '#a78bfa', marginTop: '4px' }}>
+                  类型签名: <code style={{ fontFamily: 'ui-monospace, monospace' }}>{prop.type}</code>
+                </div>
+              </div>
+            )}
+
+            {controlType === 'json' && (
+              <div>
+                <div style={{ display: 'flex', gap: '4px', marginBottom: '6px' }}>
+                  <button
+                    onClick={() => handleFillSample(prop.name, prop.type)}
+                    style={{
+                      padding: '4px 10px',
+                      fontSize: '11px',
+                      backgroundColor: '#f0f9ff',
+                      color: '#0369a1',
+                      border: '1px solid #bae6fd',
+                      borderRadius: '4px',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    📝 填充示例值
+                  </button>
+                  {currentValue !== undefined && (
+                    <button
+                      onClick={() => {
+                        onPropChange(prop.name, undefined)
+                        setJsonErrors((prev) => {
+                          const next = { ...prev }
+                          delete next[prop.name]
+                          return next
+                        })
+                      }}
+                      style={{
+                        padding: '4px 10px',
+                        fontSize: '11px',
+                        backgroundColor: '#fef2f2',
+                        color: '#b91c1c',
+                        border: '1px solid #fecaca',
+                        borderRadius: '4px',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      清除
+                    </button>
+                  )}
+                  {prop.defaultValue && (
+                    <button
+                      onClick={() =>
+                        handleJsonChange(
+                          prop.name,
+                          String(parseDefaultValue(prop.defaultValue, prop.type) ?? '')
+                        )
+                      }
+                      style={{
+                        padding: '4px 10px',
+                        fontSize: '11px',
+                        backgroundColor: '#f0fdf4',
+                        color: '#166534',
+                        border: '1px solid #bbf7d0',
+                        borderRadius: '4px',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      恢复默认
+                    </button>
+                  )}
+                </div>
+                <textarea
+                  value={String(currentValue ?? '')}
+                  onChange={(e) => handleJsonChange(prop.name, e.target.value)}
+                  placeholder={hasValue ? '' : '请输入 JSON 格式数据...'}
+                  spellCheck={false}
+                  style={{
+                    width: '100%',
+                    padding: '10px 12px',
+                    fontSize: '12px',
+                    border: `1px solid ${hasError ? '#ef4444' : '#d1d5db'}`,
+                    borderRadius: '6px',
+                    backgroundColor: hasValue ? '#ffffff' : '#f9fafb',
+                    outline: 'none',
+                    minHeight: '100px',
+                    fontFamily: 'ui-monospace, SFMono-Regular, monospace',
+                    resize: 'vertical',
+                    boxSizing: 'border-box',
+                    lineHeight: 1.5,
+                  }}
+                />
+                {hasError && errorMsg && (
+                  <div
+                    style={{
+                      marginTop: '6px',
+                      padding: '6px 10px',
+                      backgroundColor: '#fef2f2',
+                      border: '1px solid #fecaca',
+                      borderRadius: '4px',
+                      fontSize: '11px',
+                      color: '#b91c1c',
+                      lineHeight: 1.4,
+                    }}
+                  >
+                    ⚠️ {errorMsg}
+                  </div>
+                )}
+                {!hasError && hasValue && (
+                  <div
+                    style={{
+                      marginTop: '6px',
+                      fontSize: '11px',
+                      color: '#16a34a',
+                    }}
+                  >
+                    ✓ JSON 格式正确
+                  </div>
+                )}
+              </div>
+            )}
+
+            {controlType === 'textarea' && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                <textarea
+                  value={String(currentValue ?? '')}
+                  onChange={(e) => onPropChange(prop.name, e.target.value)}
+                  placeholder={hasValue ? '' : '输入值...'}
+                  style={{
+                    width: '100%',
+                    padding: '8px 12px',
+                    fontSize: '13px',
+                    border: `1px solid ${hasError ? '#ef4444' : '#d1d5db'}`,
+                    borderRadius: '6px',
+                    backgroundColor: hasValue ? '#ffffff' : '#f9fafb',
+                    outline: 'none',
+                    minHeight: '60px',
+                    fontFamily: 'inherit',
+                    resize: 'vertical',
+                    boxSizing: 'border-box',
+                  }}
+                />
+                {currentValue !== undefined && (
+                  <button
+                    onClick={() => onPropChange(prop.name, undefined)}
+                    style={{
+                      alignSelf: 'flex-end',
+                      padding: '4px 10px',
+                      fontSize: '11px',
+                      backgroundColor: '#f9fafb',
+                      color: '#6b7280',
+                      border: '1px solid #e5e7eb',
+                      borderRadius: '4px',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    清除
+                  </button>
+                )}
+              </div>
+            )}
+
             <div style={{ marginTop: '4px', display: 'flex', justifyContent: 'space-between' }}>
               <span style={{ fontSize: '11px', color: '#9ca3af' }}>
                 类型: {prop.type}
               </span>
-              {prop.defaultValue && (
-                <button
-                  onClick={() =>
-                    onPropChange(prop.name, parseDefaultValue(prop.defaultValue, prop.type))
-                  }
-                  style={{
-                    fontSize: '11px',
-                    color: '#3b82f6',
-                    background: 'none',
-                    border: 'none',
-                    cursor: 'pointer',
-                    padding: 0,
-                  }}
-                >
-                  恢复默认: {prop.defaultValue}
-                </button>
-              )}
             </div>
           </div>
         )

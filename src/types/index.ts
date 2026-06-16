@@ -16,10 +16,24 @@ export interface ComponentDoc {
   defaultExportName: string
 }
 
-export type PropValue = string | number | boolean | undefined
+export type PropValue = string | number | boolean | unknown
 
 export interface ComponentPropsState {
   [componentName: string]: {
     [propName: string]: PropValue
   }
+}
+
+export type ControlType =
+  | 'text'
+  | 'number'
+  | 'boolean'
+  | 'select'
+  | 'textarea'
+  | 'json'
+  | 'function'
+
+export interface PropValidation {
+  valid: boolean
+  error?: string
 }

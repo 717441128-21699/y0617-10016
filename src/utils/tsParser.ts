@@ -17,8 +17,11 @@ function getDefaultValue(symbol: ts.Symbol): string | undefined {
   const declarations = symbol.getDeclarations()
   if (!declarations) return undefined
   for (const decl of declarations) {
-    if (ts.isPropertySignature(decl) && decl.initializer) {
-      return decl.initializer.getText()
+    if (ts.isPropertySignature(decl)) {
+      const propDecl = decl as ts.PropertySignature & { initializer?: ts.Expression }
+      if (propDecl.initializer) {
+        return propDecl.initializer.getText()
+      }
     }
   }
   return undefined
