@@ -2,12 +2,14 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ComponentDoc, PropValue } from '@/types'
 import { loadAllComponents, ComponentDocWithCategory } from '@/utils/componentLoader'
 import { generateSampleValue, parseDefaultValue } from '@/utils/propUtils'
+import { addHistoryRecord } from '@/utils/historyManager'
 import { Sidebar } from '@/components/docs/Sidebar'
 import { PropsTable } from '@/components/docs/PropsTable'
 import { ControlPanel } from '@/components/docs/ControlPanel'
 import { Sandbox } from '@/components/docs/Sandbox'
 import { SourceViewer } from '@/components/docs/SourceViewer'
 import { PresetPanel } from '@/components/docs/PresetPanel'
+import { HistoryPanel } from '@/components/docs/HistoryPanel'
 
 function initComponentDefaults(component: ComponentDoc): Record<string, PropValue> {
   const result: Record<string, PropValue> = {}
@@ -21,42 +23,68 @@ function initComponentDefaults(component: ComponentDoc): Record<string, PropValu
   return result
 }
 
-function encodePropsToUrl(componentName: string, props: Record<string, PropValue>): string {
+interface AppState {
+  component: string | null
+  props: Record<string, PropValue> | null
+  presetName: string | null
+  showSource: boolean
+  highlightLine: number | null
+}
+
+function encodeStateToUrl(state: Partial<AppState>): string {
   const params = new URLSearchParams()
-  params.set('c', componentName)
-  const serializable: Record<string, unknown> = {}
-  for (const [key, value] of Object.entries(props)) {
-    if (value !== undefined) {
-      serializable[key] = value
+  if (state.component) {
+    params.set('c', state.component)
+  }
+  if (state.props) {
+    const serializable: Record<string, unknown> = {}
+    for (const [key, value] of Object.entries(state.props)) {
+      if (value !== undefined) serializable[key] = value
+    }
+    if (Object.keys(serializable).length > 0) {
+      try {
+        params.set('p', btoa(unescape(encodeURIComponent(JSON.stringify(serializable)))))
+      } catch {}
     }
   }
-  if (Object.keys(serializable).length > 0) {
-    try {
-      params.set('p', btoa(unescape(encodeURIComponent(JSON.stringify(serializable)))))
-    } catch {
-      // skip
-    }
+  if (state.presetName) {
+    params.set('pn', state.presetName)
+  }
+  if (state.showSource) {
+    params.set('src', '1')
+  }
+  if (state.highlightLine) {
+    params.set('ln', String(state.highlightLine))
   }
   return params.toString()
 }
 
-function decodePropsFromUrl(): { component: string | null; props: Record<string, PropValue> | null } {
+function decodeStateFromUrl(): Partial<AppState> {
   const params = new URLSearchParams(window.location.search)
-  const component = params.get('c')
-  const propsStr = params.get('p')
-  if (!component) return { component: null, props: null }
-  if (!propsStr) return { component, props: null }
-  try {
-    const decoded = JSON.parse(decodeURIComponent(escape(atob(propsStr))))
-    return { component, props: decoded as Record<string, PropValue> }
-  } catch {
-    return { component, props: null }
+  const state: Partial<AppState> = {}
+  const c = params.get('c')
+  if (c) state.component = c
+  const p = params.get('p')
+  if (p) {
+    try {
+      state.props = JSON.parse(decodeURIComponent(escape(atob(p)))) as Record<string, PropValue>
+    } catch {}
   }
+  const pn = params.get('pn')
+  if (pn) state.presetName = pn
+  const src = params.get('src')
+  if (src === '1') state.showSource = true
+  const ln = params.get('ln')
+  if (ln) {
+    const num = parseInt(ln, 10)
+    if (!isNaN(num)) state.highlightLine = num
+  }
+  return state
 }
 
 const App: React.FC = () => {
   const components: ComponentDocWithCategory[] = useMemo(() => loadAllComponents(), [])
-  const urlState = useMemo(() => decodePropsFromUrl(), [])
+  const urlState = useMemo(() => decodeStateFromUrl(), [])
 
   const [activeComponent, setActiveComponent] = useState<string | null>(
     urlState.component || components[0]?.name || null
@@ -74,47 +102,60 @@ const App: React.FC = () => {
       return map
     }
   )
-  const [showSource, setShowSource] = useState(false)
-  const [highlightLine, setHighlightLine] = useState<number | null>(null)
+  const [activePresetName, setActivePresetName] = useState<string | null>(urlState.presetName ?? null)
+  const [showSource, setShowSource] = useState<boolean>(!!urlState.showSource)
+  const [highlightLine, setHighlightLine] = useState<number | null>(urlState.highlightLine ?? null)
 
   const urlSyncTimerRef = useRef<number | null>(null)
 
   const activeComp = components.find((c) => c.name === activeComponent)
 
-  useEffect(() => {
+  const syncUrl = useCallback(() => {
     if (!activeComponent) return
-    const currentProps = propsValuesMap[activeComponent]
-    if (!currentProps) return
-
-    if (urlSyncTimerRef.current) {
-      clearTimeout(urlSyncTimerRef.current)
-    }
+    if (urlSyncTimerRef.current) clearTimeout(urlSyncTimerRef.current)
     urlSyncTimerRef.current = window.setTimeout(() => {
-      const queryString = encodePropsToUrl(activeComponent, currentProps)
-      const newUrl = `${window.location.pathname}?${queryString}`
+      const currentProps = propsValuesMap[activeComponent]
+      const query = encodeStateToUrl({
+        component: activeComponent,
+        props: currentProps,
+        presetName: activePresetName,
+        showSource,
+        highlightLine,
+      })
+      const newUrl = `${window.location.pathname}?${query}`
       window.history.replaceState(null, '', newUrl)
     }, 300)
+  }, [activeComponent, propsValuesMap, activePresetName, showSource, highlightLine])
 
+  useEffect(() => {
+    syncUrl()
     return () => {
-      if (urlSyncTimerRef.current) {
-        clearTimeout(urlSyncTimerRef.current)
-      }
+      if (urlSyncTimerRef.current) clearTimeout(urlSyncTimerRef.current)
     }
-  }, [activeComponent, propsValuesMap])
+  }, [syncUrl])
 
   const handleSelectComponent = (name: string) => {
+    const prev = activeComponent
     setActiveComponent(name)
     setShowSource(false)
     setHighlightLine(null)
+    setActivePresetName(null)
     if (!propsValuesMap[name]) {
       const comp = components.find((c) => c.name === name)
       if (comp) {
         const nameStr: string = name
-        setPropsValuesMap((prev) => ({
-          ...prev,
+        setPropsValuesMap((prevMap) => ({
+          ...prevMap,
           [nameStr]: initComponentDefaults(comp),
         }))
       }
+    }
+    if (prev && prev !== name) {
+      addHistoryRecord({
+        action: 'switch-component',
+        componentName: name,
+        props: { ...(propsValuesMap[name] || {}) },
+      })
     }
   }
 
@@ -128,6 +169,7 @@ const App: React.FC = () => {
         [propName]: value,
       },
     }))
+    setActivePresetName(null)
   }, [activeComponent])
 
   const handlePropClick = (line: number) => {
@@ -142,28 +184,67 @@ const App: React.FC = () => {
       ...prev,
       [name]: initComponentDefaults(activeComp),
     }))
+    setActivePresetName(null)
+    addHistoryRecord({
+      action: 'reset-props',
+      componentName: name,
+      props: initComponentDefaults(activeComp),
+    })
   }
 
-  const handleLoadPreset = (props: Record<string, PropValue>) => {
+  const handleLoadPreset = (props: Record<string, PropValue>, presetName: string) => {
     if (!activeComponent) return
     const name: string = activeComponent
     setPropsValuesMap((prev) => ({
       ...prev,
       [name]: { ...props },
     }))
+    setActivePresetName(presetName)
+    addHistoryRecord({
+      action: 'load-preset',
+      componentName: name,
+      props: { ...props },
+      presetName,
+    })
+  }
+
+  const handleRestoreFromHistory = (props: Record<string, PropValue>, componentName: string) => {
+    if (!propsValuesMap[componentName]) {
+      const comp = components.find((c) => c.name === componentName)
+      if (comp) {
+        setPropsValuesMap((prev) => ({
+          ...prev,
+          [componentName]: initComponentDefaults(comp),
+        }))
+      }
+    }
+    if (componentName !== activeComponent) {
+      setActiveComponent(componentName)
+    }
+    setPropsValuesMap((prev) => ({
+      ...prev,
+      [componentName]: { ...props },
+    }))
+    setActivePresetName(null)
   }
 
   const handleCopyLink = () => {
     if (!activeComponent) return
     const currentProps = propsValuesMap[activeComponent]
     if (!currentProps) return
-    const queryString = encodePropsToUrl(activeComponent, currentProps)
-    const fullUrl = `${window.location.origin}${window.location.pathname}?${queryString}`
+    const query = encodeStateToUrl({
+      component: activeComponent,
+      props: currentProps,
+      presetName: activePresetName,
+      showSource,
+      highlightLine,
+    })
+    const fullUrl = `${window.location.origin}${window.location.pathname}?${query}`
     navigator.clipboard.writeText(fullUrl).then(
       () => {
         const btn = document.getElementById('copy-link-btn')
         if (btn) {
-          btn.textContent = '✅ 已复制'
+          btn.textContent = '✅ 已复制(完整)'
           setTimeout(() => {
             btn.textContent = '🔗 分享链接'
           }, 2000)
@@ -216,7 +297,7 @@ const App: React.FC = () => {
               }}
             >
               <div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '8px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '8px', flexWrap: 'wrap' }}>
                   <h2
                     style={{
                       margin: 0,
@@ -253,6 +334,20 @@ const App: React.FC = () => {
                   >
                     {activeComp.category}
                   </span>
+                  {activePresetName && (
+                    <span
+                      style={{
+                        fontSize: '11px',
+                        padding: '3px 8px',
+                        backgroundColor: '#ede9fe',
+                        color: '#6d28d9',
+                        borderRadius: '999px',
+                        fontWeight: 600,
+                      }}
+                    >
+                      🔖 {activePresetName}
+                    </span>
+                  )}
                 </div>
                 {activeComp.description && (
                   <p style={{ margin: 0, color: '#6b7280', fontSize: '14px', lineHeight: 1.6 }}>
@@ -287,13 +382,15 @@ const App: React.FC = () => {
                   🔗 分享链接
                 </button>
                 <button
-                  onClick={() => setShowSource(true)}
+                  onClick={() => {
+                    setShowSource(true)
+                  }}
                   style={{
                     padding: '8px 16px',
                     fontSize: '13px',
-                    backgroundColor: '#ffffff',
-                    color: '#374151',
-                    border: '1px solid #d1d5db',
+                    backgroundColor: showSource ? '#eff6ff' : '#ffffff',
+                    color: showSource ? '#1d4ed8' : '#374151',
+                    border: `1px solid ${showSource ? '#bfdbfe' : '#d1d5db'}`,
                     borderRadius: '6px',
                     cursor: 'pointer',
                     transition: 'all 0.15s ease',
@@ -301,8 +398,6 @@ const App: React.FC = () => {
                     alignItems: 'center',
                     gap: '6px',
                   }}
-                  onMouseEnter={(e) => ((e.currentTarget as HTMLButtonElement).style.backgroundColor = '#f9fafb')}
-                  onMouseLeave={(e) => ((e.currentTarget as HTMLButtonElement).style.backgroundColor = '#ffffff')}
                 >
                   📄 查看源码
                 </button>
@@ -388,6 +483,11 @@ const App: React.FC = () => {
                       component={activeComp}
                       currentProps={propsValuesMap[activeComp.name] ?? {}}
                       onLoadPreset={handleLoadPreset}
+                    />
+                    <HistoryPanel
+                      componentName={activeComp.name}
+                      currentProps={propsValuesMap[activeComp.name] ?? {}}
+                      onRestore={handleRestoreFromHistory}
                     />
                     <ControlPanel
                       component={activeComp}

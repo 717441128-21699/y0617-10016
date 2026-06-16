@@ -331,6 +331,89 @@ export const ControlPanel: React.FC<ControlPanelProps> = ({
               </div>
             )}
 
+            {controlType === 'reactnode' && (
+              <div>
+                <div style={{ display: 'flex', gap: '4px', marginBottom: '6px' }}>
+                  <button
+                    onClick={() => handleFillSample(prop.name, prop.type)}
+                    style={{
+                      padding: '4px 10px',
+                      fontSize: '11px',
+                      backgroundColor: '#f0f9ff',
+                      color: '#0369a1',
+                      border: '1px solid #bae6fd',
+                      borderRadius: '4px',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    📝 填充示例
+                  </button>
+                  {currentValue !== undefined && (
+                    <button
+                      onClick={() => onPropChange(prop.name, undefined)}
+                      style={{
+                        padding: '4px 10px',
+                        fontSize: '11px',
+                        backgroundColor: '#fef2f2',
+                        color: '#b91c1c',
+                        border: '1px solid #fecaca',
+                        borderRadius: '4px',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      清除
+                    </button>
+                  )}
+                  {prop.defaultValue && (
+                    <button
+                      onClick={() =>
+                        onPropChange(
+                          prop.name,
+                          String(parseDefaultValue(prop.defaultValue, prop.type) ?? '')
+                        )
+                      }
+                      style={{
+                        padding: '4px 10px',
+                        fontSize: '11px',
+                        backgroundColor: '#f0fdf4',
+                        color: '#166534',
+                        border: '1px solid #bbf7d0',
+                        borderRadius: '4px',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      恢复默认
+                    </button>
+                  )}
+                </div>
+                <input
+                  type="text"
+                  value={String(currentValue ?? '')}
+                  onChange={(e) => onPropChange(prop.name, e.target.value)}
+                  placeholder="输入文本内容，直接渲染为 React 节点..."
+                  style={{
+                    width: '100%',
+                    padding: '8px 12px',
+                    fontSize: '13px',
+                    border: '1px solid #d1d5db',
+                    borderRadius: '6px',
+                    backgroundColor: hasValue ? '#ffffff' : '#f9fafb',
+                    outline: 'none',
+                    boxSizing: 'border-box',
+                  }}
+                />
+                <div
+                  style={{
+                    marginTop: '4px',
+                    fontSize: '11px',
+                    color: '#9ca3af',
+                  }}
+                >
+                  💡 支持纯文本，无需加引号
+                </div>
+              </div>
+            )}
+
             {controlType === 'json' && (
               <div>
                 <div style={{ display: 'flex', gap: '4px', marginBottom: '6px' }}>

@@ -59,6 +59,7 @@ export function inferControlType(type: string): ControlType {
   if (type === 'number') return 'number'
   if (type === 'string') return 'text'
   if (isFunctionType(type)) return 'function'
+  if (isReactNodeType(type)) return 'reactnode'
   if (isComplexType(type)) return 'json'
   return 'text'
 }
@@ -73,7 +74,7 @@ export function generateSampleValue(type: string): PropValue {
     return '__FUNCTION__'
   }
   if (isReactNodeType(type)) {
-    return '示例文本节点'
+    return '示例内容'
   }
   if (isArrayType(type)) {
     if (type.includes('string[]') || type.includes('Array<string>')) {

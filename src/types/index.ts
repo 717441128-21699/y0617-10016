@@ -32,6 +32,7 @@ export type ControlType =
   | 'textarea'
   | 'json'
   | 'function'
+  | 'reactnode'
 
 export interface PropValidation {
   valid: boolean
