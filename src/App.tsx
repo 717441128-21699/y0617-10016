@@ -2,7 +2,8 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ComponentDoc, PropValue } from '@/types'
 import { loadAllComponents, ComponentDocWithCategory } from '@/utils/componentLoader'
 import { generateSampleValue, parseDefaultValue } from '@/utils/propUtils'
-import { addHistoryRecord } from '@/utils/historyManager'
+import { addHistoryRecord, type HistoryRecord } from '@/utils/historyManager'
+import type { SharePackageData } from '@/utils/presetManager'
 import { Sidebar } from '@/components/docs/Sidebar'
 import { PropsTable } from '@/components/docs/PropsTable'
 import { ControlPanel } from '@/components/docs/ControlPanel'
@@ -10,6 +11,7 @@ import { Sandbox } from '@/components/docs/Sandbox'
 import { SourceViewer } from '@/components/docs/SourceViewer'
 import { PresetPanel } from '@/components/docs/PresetPanel'
 import { HistoryPanel } from '@/components/docs/HistoryPanel'
+import { PropsDiffPanel, type DiffTarget } from '@/components/docs/PropsDiffPanel'
 
 function initComponentDefaults(component: ComponentDoc): Record<string, PropValue> {
   const result: Record<string, PropValue> = {}
@@ -33,9 +35,7 @@ interface AppState {
 
 function encodeStateToUrl(state: Partial<AppState>): string {
   const params = new URLSearchParams()
-  if (state.component) {
-    params.set('c', state.component)
-  }
+  if (state.component) params.set('c', state.component)
   if (state.props) {
     const serializable: Record<string, unknown> = {}
     for (const [key, value] of Object.entries(state.props)) {
@@ -47,44 +47,80 @@ function encodeStateToUrl(state: Partial<AppState>): string {
       } catch {}
     }
   }
-  if (state.presetName) {
-    params.set('pn', state.presetName)
-  }
-  if (state.showSource) {
-    params.set('src', '1')
-  }
-  if (state.highlightLine) {
-    params.set('ln', String(state.highlightLine))
-  }
+  if (state.presetName) params.set('pn', state.presetName)
+  if (state.showSource) params.set('src', '1')
+  if (state.highlightLine) params.set('ln', String(state.highlightLine))
   return params.toString()
 }
 
-function decodeStateFromUrl(): Partial<AppState> {
+interface DecodeResult {
+  state: Partial<AppState>
+  warnings: string[]
+  errors: string[]
+  applied: { component?: boolean; props?: boolean; preset?: boolean; source?: boolean; line?: boolean }
+}
+
+function decodeStateFromUrl(components: ComponentDocWithCategory[]): DecodeResult {
   const params = new URLSearchParams(window.location.search)
-  const state: Partial<AppState> = {}
+  const result: DecodeResult = {
+    state: {},
+    warnings: [],
+    errors: [],
+    applied: {},
+  }
   const c = params.get('c')
-  if (c) state.component = c
+  if (c) {
+    const found = components.some((x) => x.name === c)
+    if (found) {
+      result.state.component = c
+      result.applied.component = true
+    } else {
+      result.errors.push(`链接中的组件「${c}」在当前项目未找到`)
+    }
+  }
   const p = params.get('p')
   if (p) {
     try {
-      state.props = JSON.parse(decodeURIComponent(escape(atob(p)))) as Record<string, PropValue>
-    } catch {}
+      result.state.props = JSON.parse(decodeURIComponent(escape(atob(p)))) as Record<string, PropValue>
+      result.applied.props = true
+    } catch {
+      result.warnings.push('Props 参数解析失败，已忽略')
+    }
   }
   const pn = params.get('pn')
-  if (pn) state.presetName = pn
+  if (pn) {
+    result.state.presetName = pn
+    result.applied.preset = true
+  }
   const src = params.get('src')
-  if (src === '1') state.showSource = true
+  if (src === '1') {
+    result.state.showSource = true
+    result.applied.source = true
+  }
   const ln = params.get('ln')
   if (ln) {
     const num = parseInt(ln, 10)
-    if (!isNaN(num)) state.highlightLine = num
+    if (!isNaN(num)) {
+      result.state.highlightLine = num
+      result.applied.line = true
+    } else {
+      result.warnings.push('行号格式有误，已忽略')
+    }
   }
-  return state
+  return result
+}
+
+interface RestoreBannerState {
+  kind: 'success' | 'partial' | 'error'
+  lines: string[]
+  key: number
 }
 
 const App: React.FC = () => {
   const components: ComponentDocWithCategory[] = useMemo(() => loadAllComponents(), [])
-  const urlState = useMemo(() => decodeStateFromUrl(), [])
+  const decodedRef = useRef<DecodeResult | null>(null)
+  decodedRef.current = decodedRef.current || decodeStateFromUrl(components)
+  const urlState = decodedRef.current.state
 
   const [activeComponent, setActiveComponent] = useState<string | null>(
     urlState.component || components[0]?.name || null
@@ -105,8 +141,46 @@ const App: React.FC = () => {
   const [activePresetName, setActivePresetName] = useState<string | null>(urlState.presetName ?? null)
   const [showSource, setShowSource] = useState<boolean>(!!urlState.showSource)
   const [highlightLine, setHighlightLine] = useState<number | null>(urlState.highlightLine ?? null)
+  const [diffTarget, setDiffTarget] = useState<DiffTarget | null>(null)
+  const [restoreBanner, setRestoreBanner] = useState<RestoreBannerState | null>(null)
+  const [historyExternal, setHistoryExternal] = useState<{
+    type: 'add'
+    action: HistoryRecord['action']
+    payload?: Partial<HistoryRecord>
+    seq: number
+  } | null>(null)
 
   const urlSyncTimerRef = useRef<number | null>(null)
+  const seqRef = useRef(0)
+
+  useEffect(() => {
+    const d = decodedRef.current
+    if (!d) return
+    const hasAny = d.applied.component || d.applied.props || d.applied.preset || d.applied.source || d.applied.line
+    if (!hasAny && d.errors.length === 0 && d.warnings.length === 0) return
+    const lines: string[] = []
+    if (d.applied.component) {
+      const compName = d.state.component || ''
+      const extras: string[] = []
+      if (d.applied.props) extras.push('Props 已还原')
+      if (d.applied.preset) extras.push(`预设名: ${d.state.presetName}`)
+      if (d.applied.source) extras.push(`源码面板: 打开${d.applied.line ? `, 高亮行 ${d.state.highlightLine}` : ''}`)
+      if (d.applied.line && !d.applied.source) extras.push(`高亮行: ${d.state.highlightLine}`)
+      lines.push(`✅ 成功打开组件「${compName}」${extras.length ? ` (${extras.join('，')})` : ''}`)
+    } else if (!urlState.component) {
+      lines.push('💡 无分享链接上下文，已展示默认组件')
+    }
+    for (const w of d.warnings) lines.push(`⚠️ ${w}`)
+    for (const e of d.errors) lines.push(`❌ ${e}`)
+    const kind: RestoreBannerState['kind'] = d.errors.length
+      ? 'error'
+      : d.warnings.length
+      ? 'partial'
+      : hasAny
+      ? 'success'
+      : 'partial'
+    setRestoreBanner({ kind, lines, key: Date.now() })
+  }, [])
 
   const activeComp = components.find((c) => c.name === activeComponent)
 
@@ -134,12 +208,21 @@ const App: React.FC = () => {
     }
   }, [syncUrl])
 
+  const triggerHistory = useCallback(
+    (action: HistoryRecord['action'], payload: Partial<HistoryRecord>) => {
+      seqRef.current += 1
+      setHistoryExternal({ type: 'add', action, payload, seq: seqRef.current })
+    },
+    []
+  )
+
   const handleSelectComponent = (name: string) => {
     const prev = activeComponent
     setActiveComponent(name)
     setShowSource(false)
     setHighlightLine(null)
     setActivePresetName(null)
+    setDiffTarget(null)
     if (!propsValuesMap[name]) {
       const comp = components.find((c) => c.name === name)
       if (comp) {
@@ -151,26 +234,28 @@ const App: React.FC = () => {
       }
     }
     if (prev && prev !== name) {
-      addHistoryRecord({
-        action: 'switch-component',
+      triggerHistory('switch-component', {
         componentName: name,
         props: { ...(propsValuesMap[name] || {}) },
       })
     }
   }
 
-  const handlePropChange = useCallback((propName: string, value: PropValue) => {
-    if (!activeComponent) return
-    const compName: string = activeComponent
-    setPropsValuesMap((prev) => ({
-      ...prev,
-      [compName]: {
-        ...prev[compName],
-        [propName]: value,
-      },
-    }))
-    setActivePresetName(null)
-  }, [activeComponent])
+  const handlePropChange = useCallback(
+    (propName: string, value: PropValue) => {
+      if (!activeComponent) return
+      const compName: string = activeComponent
+      setPropsValuesMap((prev) => ({
+        ...prev,
+        [compName]: {
+          ...prev[compName],
+          [propName]: value,
+        },
+      }))
+      setActivePresetName(null)
+    },
+    [activeComponent]
+  )
 
   const handlePropClick = (line: number) => {
     setHighlightLine(line)
@@ -180,16 +265,13 @@ const App: React.FC = () => {
   const handleResetProps = () => {
     if (!activeComp) return
     const name: string = activeComp.name
+    const defaults = initComponentDefaults(activeComp)
     setPropsValuesMap((prev) => ({
       ...prev,
-      [name]: initComponentDefaults(activeComp),
+      [name]: defaults,
     }))
     setActivePresetName(null)
-    addHistoryRecord({
-      action: 'reset-props',
-      componentName: name,
-      props: initComponentDefaults(activeComp),
-    })
+    triggerHistory('reset-props', { componentName: name, props: defaults })
   }
 
   const handleLoadPreset = (props: Record<string, PropValue>, presetName: string) => {
@@ -200,12 +282,7 @@ const App: React.FC = () => {
       [name]: { ...props },
     }))
     setActivePresetName(presetName)
-    addHistoryRecord({
-      action: 'load-preset',
-      componentName: name,
-      props: { ...props },
-      presetName,
-    })
+    triggerHistory('load-preset', { componentName: name, props: { ...props }, presetName })
   }
 
   const handleRestoreFromHistory = (props: Record<string, PropValue>, componentName: string) => {
@@ -220,12 +297,42 @@ const App: React.FC = () => {
     }
     if (componentName !== activeComponent) {
       setActiveComponent(componentName)
+      setShowSource(false)
+      setHighlightLine(null)
     }
     setPropsValuesMap((prev) => ({
       ...prev,
       [componentName]: { ...props },
     }))
     setActivePresetName(null)
+    setDiffTarget(null)
+  }
+
+  const handleRequestDiff = (target: DiffTarget) => {
+    setDiffTarget(target)
+  }
+
+  const handleApplyDiffTarget = () => {
+    if (!diffTarget) return
+    handleRestoreFromHistory(diffTarget.props, activeComponent || diffTarget.meta?.componentName as string || diffTarget.label)
+  }
+
+  const handleImportApplyProps = (props: Record<string, PropValue>) => {
+    if (!activeComponent) return
+    setPropsValuesMap((prev) => ({
+      ...prev,
+      [activeComponent]: { ...props },
+    }))
+  }
+
+  const handleImportSwitchComponent = (name: string) => {
+    handleSelectComponent(name)
+  }
+
+  const handleImportApplyContext = (ctx: NonNullable<SharePackageData['context']>) => {
+    if (ctx.presetName) setActivePresetName(ctx.presetName)
+    if (ctx.showSource) setShowSource(true)
+    if (ctx.highlightLine) setHighlightLine(ctx.highlightLine)
   }
 
   const handleCopyLink = () => {
@@ -244,10 +351,10 @@ const App: React.FC = () => {
       () => {
         const btn = document.getElementById('copy-link-btn')
         if (btn) {
-          btn.textContent = '✅ 已复制(完整)'
+          btn.textContent = '✅ 已复制(含上下文)'
           setTimeout(() => {
             btn.textContent = '🔗 分享链接'
-          }, 2000)
+          }, 2200)
         }
       },
       () => {}
@@ -278,8 +385,77 @@ const App: React.FC = () => {
           overflowY: 'auto',
           display: 'flex',
           flexDirection: 'column',
+          position: 'relative',
         }}
       >
+        {restoreBanner && (
+          <div
+            key={restoreBanner.key}
+            style={{
+              position: 'sticky',
+              top: 0,
+              zIndex: 50,
+              padding: '10px 32px',
+              fontSize: '12px',
+              backgroundColor:
+                restoreBanner.kind === 'success'
+                  ? '#ecfdf5'
+                  : restoreBanner.kind === 'error'
+                  ? '#fef2f2'
+                  : '#fffbeb',
+              color:
+                restoreBanner.kind === 'success'
+                  ? '#065f46'
+                  : restoreBanner.kind === 'error'
+                  ? '#991b1b'
+                  : '#92400e',
+              borderBottom: `1px solid ${
+                restoreBanner.kind === 'success'
+                  ? '#a7f3d0'
+                  : restoreBanner.kind === 'error'
+                  ? '#fecaca'
+                  : '#fde68a'
+              }`,
+              display: 'flex',
+              alignItems: 'flex-start',
+              justifyContent: 'space-between',
+              gap: '12px',
+            }}
+          >
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+              {restoreBanner.lines.map((l, i) => (
+                <div key={i}>{l}</div>
+              ))}
+              {restoreBanner.kind === 'error' && (
+                <div style={{ fontSize: '11px', opacity: 0.8, marginTop: '2px' }}>
+                  💡 可继续从左侧列表选择组件浏览
+                </div>
+              )}
+            </div>
+            <button
+              onClick={() => setRestoreBanner(null)}
+              style={{
+                padding: '2px 8px',
+                fontSize: '11px',
+                backgroundColor: 'rgba(255,255,255,0.6)',
+                color: 'inherit',
+                border: `1px solid ${
+                  restoreBanner.kind === 'success'
+                    ? '#a7f3d0'
+                    : restoreBanner.kind === 'error'
+                    ? '#fecaca'
+                    : '#fde68a'
+                }`,
+                borderRadius: '4px',
+                cursor: 'pointer',
+                flexShrink: 0,
+              }}
+            >
+              知道了
+            </button>
+          </div>
+        )}
+
         {activeComp ? (
           <>
             <header
@@ -292,7 +468,7 @@ const App: React.FC = () => {
                 alignItems: 'flex-start',
                 gap: '16px',
                 position: 'sticky',
-                top: 0,
+                top: restoreBanner ? '58px' : 0,
                 zIndex: 10,
               }}
             >
@@ -358,7 +534,7 @@ const App: React.FC = () => {
                   📁 {activeComp.filePath}
                 </p>
               </div>
-              <div style={{ display: 'flex', gap: '8px', flexShrink: 0 }}>
+              <div style={{ display: 'flex', gap: '8px', flexShrink: 0, flexWrap: 'wrap' }}>
                 <button
                   id="copy-link-btn"
                   onClick={handleCopyLink}
@@ -482,12 +658,38 @@ const App: React.FC = () => {
                     <PresetPanel
                       component={activeComp}
                       currentProps={propsValuesMap[activeComp.name] ?? {}}
+                      activePresetName={activePresetName}
+                      presetName={activePresetName}
+                      showSource={showSource}
+                      highlightLine={highlightLine}
                       onLoadPreset={handleLoadPreset}
+                      onRequestDiff={handleRequestDiff}
+                      onImportApplyProps={handleImportApplyProps}
+                      onImportSwitchComponent={handleImportSwitchComponent}
+                      onImportApplyContext={handleImportApplyContext}
                     />
+                    {diffTarget && (
+                      <PropsDiffPanel
+                        title="参数变更对比"
+                        target={diffTarget}
+                        currentProps={propsValuesMap[activeComp.name] ?? {}}
+                        onClose={() => setDiffTarget(null)}
+                        onApplyTarget={handleApplyDiffTarget}
+                      />
+                    )}
                     <HistoryPanel
                       componentName={activeComp.name}
                       currentProps={propsValuesMap[activeComp.name] ?? {}}
                       onRestore={handleRestoreFromHistory}
+                      onRequestDiff={(t) =>
+                        handleRequestDiff({
+                          label: t.label,
+                          kind: t.kind,
+                          props: t.props,
+                          meta: { recordId: t.recordId, componentName: activeComp.name },
+                        })
+                      }
+                      externalTrigger={historyExternal}
                     />
                     <ControlPanel
                       component={activeComp}

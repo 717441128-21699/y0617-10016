@@ -1,35 +1,55 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import type { ComponentDoc, PropValue } from '@/types'
-import type { Preset } from '@/utils/presetManager'
+import type { Preset, ImportConflictStrategy, ImportResult, SharePackageData } from '@/utils/presetManager'
 import {
   addPreset,
   deletePreset,
   downloadPresetFile,
+  downloadShareFile,
   exportPresetsToJson,
+  exportSharePackage,
   getPresetsForComponent,
   importPresetsFromJson,
   loadPresets,
+  parseSharePackage,
 } from '@/utils/presetManager'
 
 interface PresetPanelProps {
   component: ComponentDoc
   currentProps: Record<string, PropValue>
+  activePresetName: string | null
+  presetName: string | null
+  showSource: boolean
+  highlightLine: number | null
   onLoadPreset: (props: Record<string, PropValue>, presetName: string) => void
+  onRequestDiff: (target: { label: string; kind: 'preset'; props: Record<string, PropValue> }) => void
+  onImportApplyProps: (props: Record<string, PropValue>) => void
+  onImportSwitchComponent: (name: string) => void
+  onImportApplyContext: (ctx: NonNullable<SharePackageData['context']>) => void
 }
 
 export const PresetPanel: React.FC<PresetPanelProps> = ({
   component,
   currentProps,
+  activePresetName,
+  presetName,
+  showSource,
+  highlightLine,
   onLoadPreset,
+  onRequestDiff,
+  onImportApplyProps,
+  onImportSwitchComponent,
+  onImportApplyContext,
 }) => {
   const [presets, setPresets] = useState<Preset[]>([])
   const [showSaveInput, setShowSaveInput] = useState(false)
   const [showImportExport, setShowImportExport] = useState(false)
-  const [presetName, setPresetName] = useState('')
+  const [presetNameInput, setPresetNameInput] = useState('')
   const [activePresetId, setActivePresetId] = useState<string | null>(null)
-  const [activePresetName, setActivePresetName] = useState<string | null>(null)
   const [importText, setImportText] = useState('')
-  const [importResult, setImportResult] = useState<{ success: boolean; msg: string } | null>(null)
+  const [importResult, setImportResult] = useState<{ success: boolean; msg: string; detail?: ImportResult } | null>(null)
+  const [strategy, setStrategy] = useState<ImportConflictStrategy>('merge')
+  const [preview, setPreview] = useState<ReturnType<typeof parseSharePackage> | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   const refreshPresets = useCallback(() => {
@@ -39,60 +59,112 @@ export const PresetPanel: React.FC<PresetPanelProps> = ({
   useEffect(() => {
     refreshPresets()
     setActivePresetId(null)
-    setActivePresetName(null)
     setShowImportExport(false)
     setImportResult(null)
     setImportText('')
+    setPreview(null)
   }, [component.name, refreshPresets])
 
+  useEffect(() => {
+    const found = presets.find((p) => p.name === activePresetName)
+    setActivePresetId(found ? found.id : null)
+  }, [activePresetName, presets])
+
   const handleSave = () => {
-    const name = presetName.trim()
+    const name = presetNameInput.trim()
     if (!name) return
     addPreset(name, component.name, { ...currentProps })
-    setPresetName('')
+    setPresetNameInput('')
     setShowSaveInput(false)
     refreshPresets()
   }
 
   const handleDelete = (id: string) => {
     deletePreset(id)
-    if (activePresetId === id) {
-      setActivePresetId(null)
-      setActivePresetName(null)
-    }
+    if (activePresetId === id) setActivePresetId(null)
     refreshPresets()
   }
 
   const handleLoad = (preset: Preset) => {
     setActivePresetId(preset.id)
-    setActivePresetName(preset.name)
     onLoadPreset({ ...preset.props }, preset.name)
+  }
+
+  const handlePreview = (text: string) => {
+    setImportText(text)
+    if (text.trim()) {
+      setPreview(parseSharePackage(text.trim()))
+    } else {
+      setPreview(null)
+    }
+    setImportResult(null)
   }
 
   const handleCopyJson = () => {
     const allPresets = loadPresets()
     const json = exportPresetsToJson(allPresets, component.name)
     navigator.clipboard.writeText(json).then(() => {
-      setImportResult({ success: true, msg: '✅ 已复制到剪贴板' })
+      setImportResult({ success: true, msg: '✅ 预设 JSON 已复制到剪贴板' })
       setTimeout(() => setImportResult(null), 2000)
     })
   }
 
-  const handleDownloadFile = () => {
+  const handleCopySharePackage = () => {
+    const allPresets = loadPresets()
+    const json = exportSharePackage({
+      componentName: component.name,
+      presets: allPresets,
+      currentProps: { ...currentProps },
+      context: { presetName, showSource, highlightLine },
+    })
+    navigator.clipboard.writeText(json).then(() => {
+      setImportResult({ success: true, msg: '✅ 分享包(含上下文)已复制' })
+      setTimeout(() => setImportResult(null), 2500)
+    })
+  }
+
+  const handleDownloadPresets = () => {
     const allPresets = loadPresets()
     downloadPresetFile(allPresets, component.name)
   }
 
+  const handleDownloadShare = () => {
+    const allPresets = loadPresets()
+    downloadShareFile({
+      componentName: component.name,
+      presets: allPresets,
+      currentProps: { ...currentProps },
+      context: { presetName, showSource, highlightLine },
+    })
+  }
+
   const handleImportPaste = () => {
-    const result = importPresetsFromJson(importText.trim())
+    const text = importText.trim()
+    if (!text) return
+    if (preview && preview.ok) {
+      if (preview.componentName && preview.componentName !== component.name) {
+        onImportSwitchComponent(preview.componentName)
+      }
+      if (preview.currentProps) {
+        onImportApplyProps({ ...preview.currentProps })
+      }
+      if (preview.context) {
+        onImportApplyContext(preview.context)
+      }
+    }
+    const result = importPresetsFromJson(text, strategy)
     if (result.success) {
-      setImportResult({ success: true, msg: `✅ 成功导入 ${result.imported.length} 个预设` })
+      const parts = [`✅ 导入 ${result.imported.length} 个预设`]
+      if (result.skipped.length) parts.push(`跳过 ${result.skipped.length}`)
+      if (result.overwritten.length) parts.push(`覆盖 ${result.overwritten.length}`)
+      setImportResult({ success: true, msg: parts.join('，'), detail: result })
       setImportText('')
+      setPreview(null)
       refreshPresets()
     } else {
       setImportResult({ success: false, msg: `❌ 导入失败: ${result.error || '未知错误'}` })
     }
-    setTimeout(() => setImportResult(null), 3000)
+    setTimeout(() => setImportResult(null), 4000)
   }
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -101,7 +173,7 @@ export const PresetPanel: React.FC<PresetPanelProps> = ({
     const reader = new FileReader()
     reader.onload = () => {
       const text = String(reader.result || '')
-      setImportText(text)
+      handlePreview(text)
     }
     reader.readAsText(file)
     e.target.value = ''
@@ -154,7 +226,7 @@ export const PresetPanel: React.FC<PresetPanelProps> = ({
               fontWeight: 500,
             }}
           >
-            {showImportExport ? '收起' : '📤 导入/导出'}
+            {showImportExport ? '收起' : '📤 协作/分享'}
           </button>
           <button
             onClick={() => setShowSaveInput(!showSaveInput)}
@@ -178,8 +250,8 @@ export const PresetPanel: React.FC<PresetPanelProps> = ({
         <div style={{ display: 'flex', gap: '6px', marginBottom: '10px' }}>
           <input
             type="text"
-            value={presetName}
-            onChange={(e) => setPresetName(e.target.value)}
+            value={presetNameInput}
+            onChange={(e) => setPresetNameInput(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && handleSave()}
             placeholder="输入预设名称..."
             autoFocus
@@ -195,15 +267,15 @@ export const PresetPanel: React.FC<PresetPanelProps> = ({
           />
           <button
             onClick={handleSave}
-            disabled={!presetName.trim()}
+            disabled={!presetNameInput.trim()}
             style={{
               padding: '6px 12px',
               fontSize: '12px',
-              backgroundColor: presetName.trim() ? '#3b82f6' : '#e5e7eb',
-              color: presetName.trim() ? '#ffffff' : '#9ca3af',
+              backgroundColor: presetNameInput.trim() ? '#3b82f6' : '#e5e7eb',
+              color: presetNameInput.trim() ? '#ffffff' : '#9ca3af',
               border: 'none',
               borderRadius: '4px',
-              cursor: presetName.trim() ? 'pointer' : 'not-allowed',
+              cursor: presetNameInput.trim() ? 'pointer' : 'not-allowed',
               fontWeight: 500,
             }}
           >
@@ -222,7 +294,10 @@ export const PresetPanel: React.FC<PresetPanelProps> = ({
             borderRadius: '6px',
           }}
         >
-          <div style={{ display: 'flex', gap: '6px', marginBottom: '8px', flexWrap: 'wrap' }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
+            <div style={{ fontSize: '11px', fontWeight: 600, color: '#374151' }}>📦 导出</div>
+          </div>
+          <div style={{ display: 'flex', gap: '6px', marginBottom: '10px', flexWrap: 'wrap' }}>
             <button
               onClick={handleCopyJson}
               style={{
@@ -234,11 +309,12 @@ export const PresetPanel: React.FC<PresetPanelProps> = ({
                 borderRadius: '4px',
                 cursor: 'pointer',
               }}
+              title="仅预设"
             >
-              📋 复制 JSON
+              📋 预设 JSON
             </button>
             <button
-              onClick={handleDownloadFile}
+              onClick={handleDownloadPresets}
               style={{
                 padding: '4px 10px',
                 fontSize: '11px',
@@ -248,22 +324,55 @@ export const PresetPanel: React.FC<PresetPanelProps> = ({
                 borderRadius: '4px',
                 cursor: 'pointer',
               }}
+              title="仅预设"
             >
-              💾 下载 .json 文件
+              💾 预设文件
+            </button>
+            <button
+              onClick={handleCopySharePackage}
+              style={{
+                padding: '4px 10px',
+                fontSize: '11px',
+                backgroundColor: '#ede9fe',
+                color: '#5b21b6',
+                border: '1px solid #ddd6fe',
+                borderRadius: '4px',
+                cursor: 'pointer',
+                fontWeight: 500,
+              }}
+              title="包含：当前参数、预设组、查看上下文"
+            >
+              🚀 复制分享包
+            </button>
+            <button
+              onClick={handleDownloadShare}
+              style={{
+                padding: '4px 10px',
+                fontSize: '11px',
+                backgroundColor: '#ede9fe',
+                color: '#5b21b6',
+                border: '1px solid #ddd6fe',
+                borderRadius: '4px',
+                cursor: 'pointer',
+                fontWeight: 500,
+              }}
+              title="包含：当前参数、预设组、查看上下文"
+            >
+              📁 下载分享包
             </button>
             <button
               onClick={() => fileInputRef.current?.click()}
               style={{
                 padding: '4px 10px',
                 fontSize: '11px',
-                backgroundColor: '#ffffff',
-                color: '#374151',
-                border: '1px solid #d1d5db',
+                backgroundColor: '#ecfdf5',
+                color: '#047857',
+                border: '1px solid #a7f3d0',
                 borderRadius: '4px',
                 cursor: 'pointer',
               }}
             >
-              📂 选择文件
+              📂 导入文件
             </button>
             <input
               ref={fileInputRef}
@@ -273,10 +382,52 @@ export const PresetPanel: React.FC<PresetPanelProps> = ({
               style={{ display: 'none' }}
             />
           </div>
+
+          {preview && preview.ok && (
+            <div
+              style={{
+                marginBottom: '8px',
+                padding: '8px 10px',
+                backgroundColor: preview.conflictNames.length ? '#fffbeb' : '#f0fdf4',
+                border: `1px solid ${preview.conflictNames.length ? '#fde68a' : '#bbf7d0'}`,
+                borderRadius: '6px',
+                fontSize: '11px',
+              }}
+            >
+              <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
+                <span>
+                  <b>组件:</b>{' '}
+                  <code style={{ color: '#1d4ed8' }}>{preview.componentName || '(未指定)'}</code>
+                </span>
+                <span>
+                  <b>预设:</b> {preview.presetCount} 个
+                  {preview.conflictNames.length > 0 && (
+                    <span style={{ color: '#b45309' }}>
+                      {' '}（重名 {preview.conflictNames.length}:{' '}
+                      {preview.conflictNames.slice(0, 3).join(', ')}
+                      {preview.conflictNames.length > 3 ? '...' : ''}）
+                    </span>
+                  )}
+                </span>
+                <span>
+                  <b>当前参数快照:</b> {preview.hasCurrentProps ? '✅ 有' : '无'}
+                </span>
+                {preview.context && (
+                  <span>
+                    <b>上下文:</b>
+                    {preview.context.presetName && ` 预设=${preview.context.presetName}`}
+                    {preview.context.showSource && ` 源码面板=开`}
+                    {preview.context.highlightLine && ` 高亮行=${preview.context.highlightLine}`}
+                  </span>
+                )}
+              </div>
+            </div>
+          )}
+
           <textarea
             value={importText}
-            onChange={(e) => setImportText(e.target.value)}
-            placeholder="粘贴预设 JSON，或从文件导入..."
+            onChange={(e) => handlePreview(e.target.value)}
+            placeholder="粘贴预设 JSON 或分享包..."
             style={{
               width: '100%',
               padding: '6px 10px',
@@ -284,15 +435,49 @@ export const PresetPanel: React.FC<PresetPanelProps> = ({
               border: '1px solid #d1d5db',
               borderRadius: '4px',
               outline: 'none',
-              minHeight: '60px',
+              minHeight: '56px',
               fontFamily: 'ui-monospace, monospace',
               boxSizing: 'border-box',
               resize: 'vertical',
             }}
           />
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '6px' }}>
-            <div style={{ fontSize: '11px', color: '#9ca3af' }}>
-              只导入属于「{component.name}」的预设
+
+          <div
+            style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              marginTop: '6px',
+              flexWrap: 'wrap',
+              gap: '6px',
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
+              {(['merge', 'skip', 'overwrite'] as ImportConflictStrategy[]).map((s) => (
+                <button
+                  key={s}
+                  onClick={() => setStrategy(s)}
+                  style={{
+                    padding: '3px 8px',
+                    fontSize: '10px',
+                    backgroundColor: strategy === s ? '#dbeafe' : '#ffffff',
+                    color: strategy === s ? '#1d4ed8' : '#374151',
+                    border: `1px solid ${strategy === s ? '#93c5fd' : '#d1d5db'}`,
+                    borderRadius: '4px',
+                    cursor: 'pointer',
+                    fontWeight: strategy === s ? 600 : 400,
+                  }}
+                  title={
+                    s === 'merge'
+                      ? '重名自动加后缀(2)(3)... 全部保留'
+                      : s === 'skip'
+                      ? '重名直接跳过不导入'
+                      : '重名用导入内容覆盖现有'
+                  }
+                >
+                  {s === 'merge' ? '➕ 合并(重名加后缀)' : s === 'skip' ? '⏭️ 跳过(保留现有)' : '♻️ 覆盖(用导入的)'}
+                </button>
+              ))}
             </div>
             <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
               {importResult && (
@@ -319,7 +504,7 @@ export const PresetPanel: React.FC<PresetPanelProps> = ({
                   fontWeight: 500,
                 }}
               >
-                导入
+                导入并还原
               </button>
             </div>
           </div>
@@ -338,8 +523,8 @@ export const PresetPanel: React.FC<PresetPanelProps> = ({
               style={{
                 display: 'flex',
                 alignItems: 'center',
-                gap: '6px',
-                padding: '6px 8px',
+                gap: '4px',
+                padding: '5px 8px',
                 backgroundColor: activePresetId === preset.id ? '#eff6ff' : '#f9fafb',
                 border: `1px solid ${activePresetId === preset.id ? '#bfdbfe' : '#e5e7eb'}`,
                 borderRadius: '4px',
@@ -365,6 +550,24 @@ export const PresetPanel: React.FC<PresetPanelProps> = ({
                 title={preset.name}
               >
                 {preset.name}
+              </button>
+              <button
+                onClick={() =>
+                  onRequestDiff({ label: `预设「${preset.name}」`, kind: 'preset', props: { ...preset.props } })
+                }
+                style={{
+                  padding: '1px 5px',
+                  fontSize: '10px',
+                  color: '#4338ca',
+                  backgroundColor: '#eef2ff',
+                  border: '1px solid #c7d2fe',
+                  borderRadius: '3px',
+                  cursor: 'pointer',
+                  lineHeight: 1.5,
+                }}
+                title="与当前 Props 对比差异"
+              >
+                🆚
               </button>
               <span style={{ fontSize: '10px', color: '#9ca3af', whiteSpace: 'nowrap' }}>
                 {new Date(preset.createdAt).toLocaleDateString()}

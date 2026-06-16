@@ -10,12 +10,41 @@ export interface Preset {
 
 const STORAGE_KEY = 'component-doc-presets'
 
-export const PRESET_EXPORT_VERSION = 1
+export const PRESET_EXPORT_VERSION = 2
 
 export interface PresetExportData {
   version: number
   exportedAt: number
   presets: Preset[]
+}
+
+export interface SharePackageData {
+  version: number
+  exportedAt: number
+  type: 'share-package'
+  componentName: string
+  context?: {
+    presetName?: string | null
+    showSource?: boolean
+    highlightLine?: number | null
+  }
+  currentProps?: Record<string, PropValue>
+  presets: Preset[]
+}
+
+export type ImportConflictStrategy = 'merge' | 'skip' | 'overwrite'
+
+export interface ImportResult {
+  success: boolean
+  imported: Preset[]
+  skipped: string[]
+  overwritten: string[]
+  error?: string
+  packageInfo?: {
+    componentName?: string
+    presetCount: number
+    hasCurrentProps: boolean
+  }
 }
 
 function generateId(): string {
@@ -80,48 +109,185 @@ export function exportPresetsToJson(presets: Preset[], componentName?: string): 
   return JSON.stringify(data, null, 2)
 }
 
-export function importPresetsFromJson(json: string): {
-  success: boolean
-  imported: Preset[]
+export function exportSharePackage(opts: {
+  componentName: string
+  presets: Preset[]
+  currentProps?: Record<string, PropValue>
+  context?: {
+    presetName?: string | null
+    showSource?: boolean
+    highlightLine?: number | null
+  }
+}): string {
+  const pkg: SharePackageData = {
+    version: PRESET_EXPORT_VERSION,
+    exportedAt: Date.now(),
+    type: 'share-package',
+    componentName: opts.componentName,
+    presets: opts.presets.filter((p) => p.componentName === opts.componentName),
+    currentProps: opts.currentProps,
+    context: opts.context,
+  }
+  return JSON.stringify(pkg, null, 2)
+}
+
+export function downloadShareFile(opts: {
+  componentName: string
+  presets: Preset[]
+  currentProps?: Record<string, PropValue>
+  context?: SharePackageData['context']
+}): void {
+  const json = exportSharePackage(opts)
+  const blob = new Blob([json], { type: 'application/json' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `${opts.componentName}-share-${Date.now()}.json`
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+  URL.revokeObjectURL(url)
+}
+
+function extractPresetsFromJson(json: string): {
+  ok: boolean
+  presets: Preset[]
+  packageInfo?: ImportResult['packageInfo']
+  context?: SharePackageData['context']
+  currentProps?: Record<string, PropValue>
+  componentNameFromPkg?: string
   error?: string
 } {
   try {
-    let data: PresetExportData
-    try {
-      data = JSON.parse(json)
-    } catch {
-      const legacy = JSON.parse(json)
-      if (Array.isArray(legacy)) {
-        data = { version: 0, exportedAt: Date.now(), presets: legacy }
-      } else {
-        throw new Error('JSON 格式不正确')
+    const raw = JSON.parse(json)
+    if (raw && raw.type === 'share-package') {
+      const pkg = raw as SharePackageData
+      return {
+        ok: true,
+        presets: Array.isArray(pkg.presets) ? pkg.presets : [],
+        componentNameFromPkg: pkg.componentName,
+        context: pkg.context,
+        currentProps: pkg.currentProps,
+        packageInfo: {
+          componentName: pkg.componentName,
+          presetCount: Array.isArray(pkg.presets) ? pkg.presets.length : 0,
+          hasCurrentProps: !!pkg.currentProps && Object.keys(pkg.currentProps).length > 0,
+        },
       }
     }
-
-    if (!data.presets || !Array.isArray(data.presets)) {
-      return { success: false, imported: [], error: '缺少 presets 数组' }
+    if (Array.isArray(raw)) {
+      return { ok: true, presets: raw, packageInfo: { presetCount: raw.length, hasCurrentProps: false } }
     }
-
-    const existing = loadPresets()
-    const imported: Preset[] = []
-
-    for (const p of data.presets) {
-      if (!p.name || !p.componentName || !p.props) continue
-      const newPreset: Preset = {
-        id: generateId(),
-        name: p.name,
-        componentName: p.componentName,
-        props: p.props,
-        createdAt: p.createdAt || Date.now(),
-      }
-      existing.push(newPreset)
-      imported.push(newPreset)
+    if (raw && Array.isArray(raw.presets)) {
+      return { ok: true, presets: raw.presets, packageInfo: { presetCount: raw.presets.length, hasCurrentProps: false } }
     }
-
-    savePresets(existing)
-    return { success: true, imported }
+    return { ok: false, presets: [], error: '不支持的 JSON 格式' }
   } catch (e) {
-    return { success: false, imported: [], error: (e as Error).message }
+    return { ok: false, presets: [], error: (e as Error).message }
+  }
+}
+
+export function parseSharePackage(json: string): {
+  ok: boolean
+  error?: string
+  componentName?: string
+  presetNames: string[]
+  presetCount: number
+  hasCurrentProps: boolean
+  conflictNames: string[]
+  context?: SharePackageData['context']
+  currentProps?: Record<string, PropValue>
+} {
+  const extracted = extractPresetsFromJson(json)
+  if (!extracted.ok) {
+    return { ok: false, error: extracted.error, presetNames: [], presetCount: 0, hasCurrentProps: false, conflictNames: [] }
+  }
+  const existing = loadPresets()
+  const incomingNames = new Set<string>()
+  const conflictNames: string[] = []
+  for (const p of extracted.presets) {
+    if (!p.name || !p.componentName || !p.props) continue
+    incomingNames.add(`${p.componentName}::${p.name}`)
+    const exists = existing.some(
+      (e) => e.componentName === p.componentName && e.name === p.name
+    )
+    if (exists) conflictNames.push(p.name)
+  }
+  return {
+    ok: true,
+    componentName: extracted.componentNameFromPkg,
+    presetNames: extracted.presets.map((p) => p.name).filter(Boolean),
+    presetCount: extracted.presets.length,
+    hasCurrentProps: !!extracted.currentProps && Object.keys(extracted.currentProps!).length > 0,
+    conflictNames,
+    context: extracted.context,
+    currentProps: extracted.currentProps,
+  }
+}
+
+export function importPresetsFromJson(
+  json: string,
+  strategy: ImportConflictStrategy = 'merge'
+): ImportResult {
+  const extracted = extractPresetsFromJson(json)
+  if (!extracted.ok) {
+    return { success: false, imported: [], skipped: [], overwritten: [], error: extracted.error }
+  }
+
+  const validPresets = extracted.presets.filter(
+    (p) => p.name && p.componentName && p.props
+  )
+
+  const existing = loadPresets()
+  const imported: Preset[] = []
+  const skipped: string[] = []
+  const overwritten: string[] = []
+
+  for (const p of validPresets) {
+    const conflictIdx = existing.findIndex(
+      (e) => e.componentName === p.componentName && e.name === p.name
+    )
+    const hasConflict = conflictIdx !== -1
+
+    if (hasConflict) {
+      if (strategy === 'skip') {
+        skipped.push(p.name)
+        continue
+      }
+      if (strategy === 'overwrite') {
+        const updated: Preset = { ...existing[conflictIdx], props: { ...p.props } }
+        existing[conflictIdx] = updated
+        overwritten.push(p.name)
+        imported.push(updated)
+        continue
+      }
+    }
+
+    let finalName = p.name
+    if (strategy === 'merge' && hasConflict) {
+      let i = 2
+      while (existing.some((e) => e.componentName === p.componentName && e.name === finalName)) {
+        finalName = `${p.name} (${i++})`
+      }
+    }
+    const newPreset: Preset = {
+      id: generateId(),
+      name: finalName,
+      componentName: p.componentName,
+      props: p.props,
+      createdAt: p.createdAt || Date.now(),
+    }
+    existing.push(newPreset)
+    imported.push(newPreset)
+  }
+
+  savePresets(existing)
+  return {
+    success: true,
+    imported,
+    skipped,
+    overwritten,
+    packageInfo: extracted.packageInfo,
   }
 }
 

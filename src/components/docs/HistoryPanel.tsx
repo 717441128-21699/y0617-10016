@@ -5,7 +5,6 @@ import {
   clearHistory,
   formatActionLabel,
   formatTimeAgo,
-  getHistoryForComponent,
   loadHistory,
   type HistoryRecord,
 } from '@/utils/historyManager'
@@ -14,28 +13,44 @@ interface HistoryPanelProps {
   componentName: string
   currentProps: Record<string, PropValue>
   onRestore: (props: Record<string, PropValue>, componentName: string) => void
+  onRequestDiff: (target: { label: string; kind: 'history'; props: Record<string, PropValue>; recordId: string }) => void
+  externalTrigger?: { type: 'add'; action: HistoryRecord['action']; payload?: Partial<HistoryRecord> } | null
 }
 
 export const HistoryPanel: React.FC<HistoryPanelProps> = ({
   componentName,
   currentProps,
   onRestore,
+  onRequestDiff,
+  externalTrigger,
 }) => {
   const [records, setRecords] = useState<HistoryRecord[]>([])
   const [isOpen, setIsOpen] = useState(false)
+  const lastExternalRef = useRef(externalTrigger)
 
   const refresh = useCallback(() => {
-    setRecords(getHistoryForComponent(componentName))
-  }, [componentName])
+    setRecords(loadHistory())
+  }, [])
 
   useEffect(() => {
     refresh()
   }, [componentName, isOpen, refresh])
 
-  const handleRecordChange = useCallback((record: Omit<HistoryRecord, 'id' | 'timestamp'>) => {
-    addHistoryRecord(record)
-    if (isOpen) refresh()
-  }, [isOpen, refresh])
+  useEffect(() => {
+    if (!externalTrigger || externalTrigger === lastExternalRef.current) return
+    lastExternalRef.current = externalTrigger
+    if (externalTrigger.type === 'add' && externalTrigger.payload) {
+      addHistoryRecord({
+        action: externalTrigger.action,
+        componentName: externalTrigger.payload.componentName || componentName,
+        props: externalTrigger.payload.props ? { ...externalTrigger.payload.props } : { ...currentProps },
+        presetName: externalTrigger.payload.presetName,
+        propName: externalTrigger.payload.propName,
+        propValue: externalTrigger.payload.propValue,
+      })
+    }
+    refresh()
+  }, [externalTrigger, componentName, currentProps, refresh])
 
   const handleClear = () => {
     clearHistory()
@@ -46,7 +61,12 @@ export const HistoryPanel: React.FC<HistoryPanelProps> = ({
     onRestore({ ...record.props }, record.componentName)
   }
 
-  const allRecords = isOpen ? records : loadHistory().slice(0, 20)
+  const handleDiff = (record: HistoryRecord) => {
+    const label = `${formatActionLabel(record.action).label} · ${formatTimeAgo(record.timestamp)}`
+    onRequestDiff({ label, kind: 'history', props: { ...record.props }, recordId: record.id })
+  }
+
+  const allRecords = isOpen ? records : records.slice(0, 20)
 
   return (
     <div style={{ marginBottom: '16px' }}>
@@ -61,7 +81,7 @@ export const HistoryPanel: React.FC<HistoryPanelProps> = ({
         <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '13px', fontWeight: 600, color: '#374151' }}>
           <span>🕘</span> 操作历史
           <span style={{ fontSize: '10px', fontWeight: 400, color: '#9ca3af' }}>
-            ({allRecords.length} 条)
+            ({records.length} 条)
           </span>
         </div>
         <div style={{ display: 'flex', gap: '4px' }}>
@@ -112,53 +132,83 @@ export const HistoryPanel: React.FC<HistoryPanelProps> = ({
         >
           {allRecords.map((record) => {
             const { label, icon, color } = formatActionLabel(record.action)
+            const isCurrentComponent = record.componentName === componentName
             return (
-              <button
+              <div
                 key={record.id}
-                onClick={() => handleRestore(record)}
                 style={{
                   display: 'flex',
                   alignItems: 'center',
-                  gap: '8px',
-                  padding: '6px 8px',
+                  gap: '6px',
+                  padding: '5px 8px',
                   textAlign: 'left',
-                  backgroundColor: '#fafafa',
-                  border: '1px solid #e5e7eb',
+                  backgroundColor: isCurrentComponent ? '#fafafa' : '#f8fafc',
+                  border: `1px solid ${isCurrentComponent ? '#e5e7eb' : '#e2e8f0'}`,
                   borderRadius: '4px',
-                  cursor: 'pointer',
                   fontSize: '11px',
                   transition: 'all 0.15s ease',
                 }}
-                onMouseEnter={(e) => {
-                  ;(e.currentTarget as HTMLButtonElement).style.backgroundColor = '#eff6ff'
-                  ;(e.currentTarget as HTMLButtonElement).style.borderColor = '#bfdbfe'
-                }}
-                onMouseLeave={(e) => {
-                  ;(e.currentTarget as HTMLButtonElement).style.backgroundColor = '#fafafa'
-                  ;(e.currentTarget as HTMLButtonElement).style.borderColor = '#e5e7eb'
-                }}
               >
-                <span style={{ fontSize: '14px' }}>{icon}</span>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                <span style={{ fontSize: '13px', flexShrink: 0 }}>{icon}</span>
+                <button
+                  onClick={() => handleRestore(record)}
+                  style={{
+                    flex: 1,
+                    textAlign: 'left',
+                    padding: 0,
+                    background: 'none',
+                    border: 'none',
+                    cursor: 'pointer',
+                    minWidth: 0,
+                  }}
+                  title={`恢复至 ${record.componentName} · ${new Date(record.timestamp).toLocaleString()}`}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
                     <span style={{ fontWeight: 600, color }}>{label}</span>
-                    <span style={{ fontSize: '10px', color: '#9ca3af' }}>
-                      · {record.componentName}
+                    <span
+                      style={{
+                        fontSize: '10px',
+                        padding: '1px 6px',
+                        backgroundColor: isCurrentComponent ? '#eff6ff' : '#f1f5f9',
+                        color: isCurrentComponent ? '#1d4ed8' : '#475569',
+                        borderRadius: '999px',
+                        fontWeight: 500,
+                      }}
+                    >
+                      {isCurrentComponent ? '📍当前组件' : `🔀 ${record.componentName}`}
                     </span>
                   </div>
                   <div style={{ fontSize: '10px', color: '#9ca3af', marginTop: '2px' }}>
-                    {record.presetName && <span>预设: {record.presetName} </span>}
+                    {record.presetName && <span>预设: {record.presetName} · </span>}
                     {record.propName && (
                       <span>
-                        Prop: <code style={{ fontFamily: 'ui-monospace, monospace' }}>{record.propName}</code>
+                        Prop:{' '}
+                        <code style={{ fontFamily: 'ui-monospace, monospace' }}>{record.propName}</code>
                       </span>
                     )}
                   </div>
-                </div>
-                <span style={{ fontSize: '10px', color: '#9ca3af', whiteSpace: 'nowrap' }}>
+                </button>
+                <button
+                  onClick={() => handleDiff(record)}
+                  style={{
+                    padding: '1px 5px',
+                    fontSize: '10px',
+                    color: '#4338ca',
+                    backgroundColor: '#eef2ff',
+                    border: '1px solid #c7d2fe',
+                    borderRadius: '3px',
+                    cursor: 'pointer',
+                    lineHeight: 1.5,
+                    flexShrink: 0,
+                  }}
+                  title="与当前状态对比"
+                >
+                  🆚
+                </button>
+                <span style={{ fontSize: '10px', color: '#9ca3af', whiteSpace: 'nowrap', flexShrink: 0 }}>
                   {formatTimeAgo(record.timestamp)}
                 </span>
-              </button>
+              </div>
             )
           })}
         </div>
@@ -167,7 +217,7 @@ export const HistoryPanel: React.FC<HistoryPanelProps> = ({
       <HistoryRecorder
         componentName={componentName}
         currentProps={currentProps}
-        onRecord={handleRecordChange}
+        onRefresh={refresh}
       />
     </div>
   )
@@ -176,63 +226,92 @@ export const HistoryPanel: React.FC<HistoryPanelProps> = ({
 interface HistoryRecorderProps {
   componentName: string
   currentProps: Record<string, PropValue>
-  onRecord: (record: Omit<HistoryRecord, 'id' | 'timestamp'>) => void
+  onRefresh: () => void
 }
 
-const HistoryRecorder: React.FC<HistoryRecorderProps> = ({
-  componentName,
-  currentProps,
-  onRecord,
-}) => {
-  const lastComponentRef = useRef(componentName)
-  const lastPropsRef = useRef(currentProps)
-  const hasRecordedMountRef = useRef(false)
+const HistoryRecorder: React.FC<HistoryRecorderProps> = ({ componentName, currentProps, onRefresh }) => {
+  const lastComponentRef = useRef<string | null>(null)
+  const lastPropsSnapshotRef = useRef<string>('')
+  const recordedKeysRef = useRef<Set<string>>(new Set())
+  const skippedFirstRef = useRef(false)
 
   useEffect(() => {
-    if (!hasRecordedMountRef.current) {
-      hasRecordedMountRef.current = true
+    if (!skippedFirstRef.current) {
+      skippedFirstRef.current = true
       lastComponentRef.current = componentName
-      lastPropsRef.current = currentProps
+      lastPropsSnapshotRef.current = JSON.stringify(currentProps)
+      for (const k of Object.keys(currentProps)) recordedKeysRef.current.add(`${componentName}::${k}`)
       return
     }
 
-    if (componentName !== lastComponentRef.current) {
-      onRecord({
+    if (lastComponentRef.current !== null && componentName !== lastComponentRef.current) {
+      addHistoryRecord({
         action: 'switch-component',
         componentName,
         props: { ...currentProps },
       })
       lastComponentRef.current = componentName
-      lastPropsRef.current = currentProps
+      lastPropsSnapshotRef.current = JSON.stringify(currentProps)
+      onRefresh()
       return
     }
 
-    const prevKeys = Object.keys(lastPropsRef.current)
+    const prev: Record<string, PropValue> = JSON.parse(lastPropsSnapshotRef.current || '{}')
+    const prevKeys = Object.keys(prev)
     const currKeys = Object.keys(currentProps)
-    if (prevKeys.length !== currKeys.length) {
-      lastPropsRef.current = currentProps
-      return
-    }
     let changedKey: string | null = null
+    let changedValue: PropValue | undefined = undefined
+    let isFirstSet = false
+
     for (const key of currKeys) {
-      const prev = JSON.stringify(lastPropsRef.current[key])
-      const curr = JSON.stringify(currentProps[key])
-      if (prev !== curr) {
+      const p = JSON.stringify(prev[key])
+      const c = JSON.stringify(currentProps[key])
+      if (p !== c) {
         changedKey = key
+        changedValue = currentProps[key]
+        const marker = `${componentName}::${key}`
+        if (!(key in prev) && !recordedKeysRef.current.has(marker)) {
+          isFirstSet = true
+        }
+        recordedKeysRef.current.add(marker)
         break
       }
     }
-    if (changedKey) {
-      onRecord({
-        action: 'change-prop',
-        componentName,
-        props: { ...currentProps },
-        propName: changedKey,
-        propValue: currentProps[changedKey],
-      })
-      lastPropsRef.current = currentProps
+
+    if (!changedKey && prevKeys.length !== currKeys.length) {
+      for (const key of prevKeys) {
+        if (!(key in currentProps)) {
+          changedKey = key
+          changedValue = undefined
+          break
+        }
+      }
     }
-  }, [componentName, currentProps, onRecord])
+
+    if (changedKey) {
+      const last = loadHistory()[0]
+      const isSamePropSameValue =
+        last &&
+        last.action === 'change-prop' &&
+        last.componentName === componentName &&
+        last.propName === changedKey &&
+        JSON.stringify(last.propValue) === JSON.stringify(changedValue)
+      if (!isSamePropSameValue) {
+        addHistoryRecord({
+          action: 'change-prop',
+          componentName,
+          props: { ...currentProps },
+          propName: changedKey,
+          propValue: changedValue,
+        })
+        if (isFirstSet) {
+          onRefresh()
+        }
+      }
+      lastPropsSnapshotRef.current = JSON.stringify(currentProps)
+      onRefresh()
+    }
+  }, [componentName, currentProps, onRefresh])
 
   return null
 }

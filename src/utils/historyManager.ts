@@ -39,8 +39,30 @@ export function saveHistory(records: HistoryRecord[]): void {
   }
 }
 
-export function addHistoryRecord(record: Omit<HistoryRecord, 'id' | 'timestamp'>): HistoryRecord {
+export function addHistoryRecord(record: Omit<HistoryRecord, 'id' | 'timestamp'>): HistoryRecord | null {
   const history = loadHistory()
+
+  if (history.length > 0) {
+    const last = history[0]
+    const sameAction = last.action === record.action
+    const sameComponent = last.componentName === record.componentName
+    if (sameAction && sameComponent) {
+      if (record.action === 'change-prop') {
+        if (last.propName === record.propName) {
+          const lastVal = JSON.stringify(last.propValue)
+          const newVal = JSON.stringify(record.propValue)
+          if (lastVal === newVal) return null
+        }
+      }
+      if (record.action === 'switch-component' || record.action === 'reset-props') {
+        return null
+      }
+      if (record.action === 'load-preset' && last.presetName === record.presetName) {
+        return null
+      }
+    }
+  }
+
   const newRecord: HistoryRecord = {
     id: generateId(),
     timestamp: Date.now(),
